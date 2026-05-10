@@ -1,0 +1,11 @@
+.git
+.DS_Store
+env
+data
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints
+req.txt
+eda.ipynb

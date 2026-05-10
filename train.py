@@ -1,104 +1,148 @@
+from collections import Counter
+
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import matplotlib.pyplot as plt
-import numpy as np
-from sklearn.model_selection import train_test_split
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
-from torch.utils.data import Subset
-from PIL import Image
-import os
+from torch.optim import Adam
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-# Define your paths again so this notebook knows where to look
-train_dir = 'data/train'
-test_dir = 'data/test'
+from dataset import get_loaders
+from model import get_model
 
-# Set device (use GPU if available, otherwise CPU)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-# --- AUGMENTATION DESIGNER PIPELINE ---
-train_transform = transforms.Compose([
-    transforms.Grayscale(num_output_channels=1),
-    transforms.RandomResizedCrop(48, scale=(0.8, 1.0)),
-    transforms.RandomHorizontalFlip(p=0.5), # Requirement: Horizontal Flip
-    transforms.RandomRotation(20),          # Requirement: Rotation
-    transforms.ColorJitter(brightness=0.2, contrast=0.2), # Requirement: Brightness
-    transforms.ToTensor(),
-    # --- DATA MANAGER REQUIREMENT: Convert to RGB (3-channel) ---
-    transforms.Lambda(lambda x: x.repeat(3, 1, 1)),
-    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-])
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+BATCH_SIZE = 32
+PHASE1_EPOCHS = 5
+PHASE2_EPOCHS = 25
+SAVE_PATH = "emotion_detector.pth"
 
-test_transform = transforms.Compose([
-    transforms.Grayscale(num_output_channels=1),
-    transforms.ToTensor(),
-    transforms.Lambda(lambda x: x.repeat(3, 1, 1)),
-    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-])
 
-# --- DATA MANAGER REQUIREMENT: Load and Split ---
-# 1. Load the full training folder
-full_train_dataset = datasets.ImageFolder(root='data/train', transform=train_transform)
+def train_epoch(model, loader, criterion, optimizer):
+    model.train()
+    total_loss = 0.0
+    correct = 0
 
-# 2. Split into Train (80%) and Validation (20%)
-# stratify=full_train_dataset.targets ensures the emotion balance is preserved
-train_idx, val_idx = train_test_split(
-    range(len(full_train_dataset)),
-    test_size=0.2,
-    stratify=full_train_dataset.targets,
-    random_state=42
-)
+    for imgs, labels in loader:
+        imgs = imgs.to(DEVICE)
+        labels = labels.to(DEVICE)
 
-# 3. Create the Subsets
-train_data = Subset(full_train_dataset, train_idx)
-val_data = Subset(full_train_dataset, val_idx) # This is your 'practice exam' set
-test_dataset = datasets.ImageFolder(root='data/test', transform=test_transform)
+        optimizer.zero_grad()
+        outputs = model(imgs)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
 
-# 4. Initialize DataLoaders
-train_loader = DataLoader(train_data, batch_size=64, shuffle=True)
-val_loader = DataLoader(val_data, batch_size=64, shuffle=False)
-test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
+        total_loss += loss.item() * imgs.size(0)
+        correct += (outputs.argmax(1) == labels).sum().item()
 
-print(f"Data Manager: Split Complete.")
-print(f"Training: {len(train_data)} | Validation: {len(val_data)} | Test: {len(test_dataset)}")
-def visualize_augmentations(dataset, idx=0):
-    plt.figure(figsize=(15, 5))
-    
-    # --- THE FIX FOR SUBSETS ---
-    # If the dataset is a Subset, we need to find the real index in the original folder
-    if isinstance(dataset, torch.utils.data.Subset):
-        actual_idx = dataset.indices[idx]
-        base_dataset = dataset.dataset
-    else:
-        actual_idx = idx
-        base_dataset = dataset
+    sample_count = len(loader.dataset)
+    return total_loss / sample_count, correct / sample_count
 
-    # 1. Show Original
-    img_path, _ = base_dataset.samples[actual_idx]
-    original_img = Image.open(img_path).convert('L')
-    plt.subplot(1, 6, 1)
-    plt.imshow(original_img, cmap='gray')
-    plt.title("Original")
-    plt.axis('off')
 
-    # 2. Show Augmented Versions
-    for i in range(5):
-        aug_tensor, _ = dataset[idx] # This still pulls the augmented version correctly
-        
-        # Convert from [3, 48, 48] to [48, 48, 3]
-        aug_img = aug_tensor.numpy().transpose(1, 2, 0)
-        
-        # Undo the normalization for display
-        aug_img = (aug_img * 0.5) + 0.5 
-        aug_img = np.clip(aug_img, 0, 1) # Safety check for brightness/contrast
-        
-        plt.subplot(1, 6, i + 2)
-        plt.imshow(aug_img) 
-        plt.title(f"Augmented {i+1}")
-        plt.axis('off')
-    
-    plt.suptitle("Augmentation Designer: 3-Channel Training Variations", fontsize=16)
+@torch.no_grad()
+def eval_epoch(model, loader, criterion):
+    model.eval()
+    total_loss = 0.0
+    correct = 0
+
+    for imgs, labels in loader:
+        imgs = imgs.to(DEVICE)
+        labels = labels.to(DEVICE)
+
+        outputs = model(imgs)
+        loss = criterion(outputs, labels)
+
+        total_loss += loss.item() * imgs.size(0)
+        correct += (outputs.argmax(1) == labels).sum().item()
+
+    sample_count = len(loader.dataset)
+    return total_loss / sample_count, correct / sample_count
+
+
+def compute_class_weights(train_dataset):
+    targets = train_dataset.targets
+    counts = Counter(targets)
+    total = len(targets)
+    class_count = len(counts)
+    weights = [total / (class_count * counts[index]) for index in range(class_count)]
+    return torch.tensor(weights, dtype=torch.float32, device=DEVICE)
+
+
+def plot_curves(history):
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+    ax1.plot(history["train_loss"], label="Train")
+    ax1.plot(history["val_loss"], label="Val")
+    ax1.set_title("Loss")
+    ax1.legend()
+
+    ax2.plot(history["train_acc"], label="Train")
+    ax2.plot(history["val_acc"], label="Val")
+    ax2.set_title("Accuracy")
+    ax2.axhline(0.60, color="red", linestyle="--", label="Target 60%")
+    ax2.legend()
+
+    plt.tight_layout()
+    plt.savefig("training_curves.png", dpi=150)
     plt.show()
 
-visualize_augmentations(train_data, idx=0)
+
+def run_training():
+    train_loader, val_loader, _, classes = get_loaders(batch_size=BATCH_SIZE)
+    model = get_model(num_classes=len(classes), freeze_backbone=True).to(DEVICE)
+
+    class_weights = compute_class_weights(train_loader.dataset)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
+    best_val_acc = 0.0
+
+    print("Phase 1: training head only...")
+    optimizer = Adam(model.fc.parameters(), lr=1e-3)
+    scheduler = ReduceLROnPlateau(optimizer, patience=3, factor=0.5)
+
+    for epoch in range(PHASE1_EPOCHS):
+        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer)
+        val_loss, val_acc = eval_epoch(model, val_loader, criterion)
+        scheduler.step(val_loss)
+
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+        history["train_acc"].append(train_acc)
+        history["val_acc"].append(val_acc)
+
+        print(f"Ep {epoch + 1}/{PHASE1_EPOCHS} | loss {train_loss:.4f} | val_acc {val_acc:.4f}")
+
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save(model.state_dict(), SAVE_PATH)
+            print(f"  -> Saved best model ({val_acc:.4f})")
+
+    print("\nPhase 2: fine-tuning all layers...")
+    for param in model.parameters():
+        param.requires_grad = True
+
+    optimizer = Adam(model.parameters(), lr=1e-4)
+    scheduler = ReduceLROnPlateau(optimizer, patience=3, factor=0.5)
+
+    for epoch in range(PHASE2_EPOCHS):
+        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer)
+        val_loss, val_acc = eval_epoch(model, val_loader, criterion)
+        scheduler.step(val_loss)
+
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+        history["train_acc"].append(train_acc)
+        history["val_acc"].append(val_acc)
+
+        print(f"Ep {epoch + 1}/{PHASE2_EPOCHS} | loss {train_loss:.4f} | val_acc {val_acc:.4f}")
+
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save(model.state_dict(), SAVE_PATH)
+            print(f"  -> Saved best model ({val_acc:.4f})")
+
+    print(f"\nTraining complete. Best val acc: {best_val_acc:.4f}")
+    print(f"Model saved to {SAVE_PATH}")
+    plot_curves(history)
+
+
+if __name__ == "__main__":
+    run_training()

@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Emotion Detector</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, sans-serif;
+      background: linear-gradient(180deg, #eef4fb 0%, #dfe8f3 100%);
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      padding: 2rem;
+      color: #16324f;
+    }
+    .container { max-width: 640px; width: 100%; }
+    h1 { font-size: 1.9rem; color: #10324e; margin-bottom: .25rem; }
+    .sub { color: #4e6479; font-size: .95rem; margin-bottom: 1.5rem; }
+    .drop-zone {
+      border: 2px dashed #2b67a7;
+      border-radius: 16px;
+      padding: 2rem;
+      text-align: center;
+      cursor: pointer;
+      background: rgba(255,255,255,.85);
+      transition: transform .2s ease, background .2s ease, border-color .2s ease;
+      box-shadow: 0 12px 30px rgba(16, 50, 78, 0.08);
+    }
+    .drop-zone:hover, .drop-zone.over {
+      background: #eef6ff;
+      border-color: #174f86;
+      transform: translateY(-1px);
+    }
+    .drop-zone p { color: #355266; font-size: .98rem; }
+    #file-input { display: none; }
+    #preview { margin-top: 1rem; text-align: center; display: none; }
+    #preview img {
+      max-height: 260px;
+      border-radius: 12px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.16);
+    }
+    button#predict-btn {
+      display: block;
+      width: 100%;
+      margin-top: 1rem;
+      padding: .9rem;
+      background: #1f5f9f;
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity .2s ease, transform .2s ease;
+    }
+    button#predict-btn:hover:not(:disabled) { transform: translateY(-1px); }
+    button#predict-btn:disabled { background: #93a4b8; cursor: default; }
+    #spinner { text-align: center; margin-top: 1rem; display: none; color: #4e6479; }
+    #result {
+      margin-top: 1.5rem;
+      background: rgba(255,255,255,.92);
+      border-radius: 16px;
+      padding: 1.25rem;
+      display: none;
+      box-shadow: 0 12px 30px rgba(16, 50, 78, 0.08);
+    }
+    .dominant {
+      font-size: 1.8rem;
+      font-weight: 800;
+      color: #10324e;
+      text-align: center;
+      margin-bottom: 1rem;
+    }
+    .bar-row { margin-bottom: .6rem; }
+    .bar-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: .88rem;
+      color: #4e6479;
+      margin-bottom: 4px;
+    }
+    .bar-bg { background: #e5ecf4; border-radius: 999px; height: 12px; overflow: hidden; }
+    .bar-fill {
+      height: 12px;
+      border-radius: 999px;
+      background: #1f5f9f;
+      transition: width .4s ease;
+    }
+    .bar-fill.top { background: #e0a226; }
+    #error {
+      margin-top: 1rem;
+      background: #ffe0e0;
+      color: #8f1f1f;
+      border-radius: 10px;
+      padding: .8rem 1rem;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>Emotion Detector</h1>
+  <p class="sub">Upload a face photo to classify the dominant emotion.</p>
+
+  <div class="drop-zone" id="drop-zone">
+    <p>Drag & drop a photo here, or click to select</p>
+    <input type="file" id="file-input" accept="image/jpeg,image/png">
+  </div>
+
+  <div id="preview"><img id="preview-img" alt="preview"></div>
+  <button id="predict-btn" disabled>Detect Emotion</button>
+  <div id="spinner">Analyzing...</div>
+  <div id="error"></div>
+  <div id="result">
+    <div class="dominant" id="dominant-label"></div>
+    <div id="bars"></div>
+  </div>
+</div>
+
+<script>
+  const EMOJIS = {
+    angry: "😠",
+    disgust: "🤢",
+    fear: "😨",
+    happy: "😊",
+    neutral: "😐",
+    sad: "😢",
+    surprise: "😲"
+  };
+
+  let selectedFile = null;
+
+  const dropZone = document.getElementById("drop-zone");
+  const fileInput = document.getElementById("file-input");
+  const btn = document.getElementById("predict-btn");
+
+  dropZone.addEventListener("click", () => fileInput.click());
+  dropZone.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    dropZone.classList.add("over");
+  });
+  dropZone.addEventListener("dragleave", () => dropZone.classList.remove("over"));
+  dropZone.addEventListener("drop", (event) => {
+    event.preventDefault();
+    dropZone.classList.remove("over");
+    if (event.dataTransfer.files[0]) {
+      setFile(event.dataTransfer.files[0]);
+    }
+  });
+  fileInput.addEventListener("change", () => {
+    if (fileInput.files[0]) {
+      setFile(fileInput.files[0]);
+    }
+  });
+
+  function setFile(file) {
+    selectedFile = file;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      document.getElementById("preview-img").src = event.target.result;
+      document.getElementById("preview").style.display = "block";
+    };
+    reader.readAsDataURL(file);
+    btn.disabled = false;
+    document.getElementById("result").style.display = "none";
+    document.getElementById("error").style.display = "none";
+  }
+
+  btn.addEventListener("click", async () => {
+    if (!selectedFile) return;
+
+    btn.disabled = true;
+    document.getElementById("spinner").style.display = "block";
+    document.getElementById("result").style.display = "none";
+    document.getElementById("error").style.display = "none";
+
+    const formData = new FormData();
+    formData.append("file", selectedFile);
+
+    try {
+      const response = await fetch("/predict", {
+        method: "POST",
+        body: formData
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || "Server error");
+      }
+
+      const data = await response.json();
+      showResult(data);
+    } catch (error) {
+      const errorBox = document.getElementById("error");
+      errorBox.textContent = "Error: " + error.message;
+      errorBox.style.display = "block";
+    } finally {
+      document.getElementById("spinner").style.display = "none";
+      btn.disabled = false;
+    }
+  });
+
+  function showResult(data) {
+    const label = document.getElementById("dominant-label");
+    label.textContent = `${EMOJIS[data.emotion] || ""} ${data.emotion.toUpperCase()} (${(data.confidence * 100).toFixed(1)}%)`;
+
+    const sorted = Object.entries(data.all_emotions).sort((left, right) => right[1] - left[1]);
+    const barsElement = document.getElementById("bars");
+    barsElement.innerHTML = "";
+
+    sorted.forEach(([emotion, probability], index) => {
+      const percentage = (probability * 100).toFixed(1);
+      barsElement.innerHTML += `
+        <div class="bar-row">
+          <div class="bar-label">
+            <span>${EMOJIS[emotion]} ${emotion}</span>
+            <span>${percentage}%</span>
+          </div>
+          <div class="bar-bg">
+            <div class="bar-fill ${index === 0 ? "top" : ""}" style="width:${percentage}%"></div>
+          </div>
+        </div>`;
+    });
+
+    document.getElementById("result").style.display = "block";
+  }
+</script>
+</body>
+</html>
